@@ -1,0 +1,667 @@
+# Sidra - Specification
+
+A minimal Apple Music desktop client. CastLabs Electron wraps `music.apple.com` directly, injecting a lightweight hook script to bridge MusicKit.js events to native platform media controls. Apple maintains the UI; Sidra maintains the bridge.
+
+Target: under 1000 lines of application code. Four runtime dependencies.
+
+---
+
+## Table of Contents
+
+- [Design Rationale](#design-rationale)
+- [Technology Stack](#technology-stack)
+- [Architecture](#architecture)
+- [Source Structure](#source-structure)
+- [Dependencies](#dependencies)
+- [IPC Event Flow](#ipc-event-flow)
+- [MusicKit Hook Script](#musickit-hook-script)
+- [Platform Media Controls](#platform-media-controls)
+- [MPRIS Specification](#mpris-specification)
+- [Volume Sync](#volume-sync)
+- [Authentication](#authentication)
+- [Discord Rich Presence](#discord-rich-presence)
+- [Track Change Notifications](#track-change-notifications)
+- [Feature Inventory](#feature-inventory)
+- [Risk Assessment](#risk-assessment)
+- [Prior Art](#prior-art)
+- [Sources](#sources)
+
+---
+
+## Design Rationale
+
+Cider builds a custom UI on top of MusicKit.js and maintains thousands of components, custom DRM workarounds, authentication flows, a plugin marketplace, and a theme engine. Sidra does none of this.
+
+| Concern | Cider | Sidra |
+|---|---|---|
+| UI maintenance | Full custom Vue.js UI | Apple maintains it |
+| Feature completeness | Lossless requires custom audio engine | Works out of the box |
+| Stability | Complex custom stack with many moving parts | Minimal surface area |
+| Apple API changes | Broken the app entirely (Dec 2022) | Web app just updates silently |
+| Cross-platform effort | Different backends per platform | Same shell everywhere |
+| Code volume | ~5000+ commits | Target: <1000 lines |
+
+Cider's MPRIS is broken because it is a fragile IPC relay built on top of a custom UI layer built on top of MusicKit.js. Every layer adds failure modes. Sidra bypasses all of that - Apple's own web app handles playback state, and we observe it.
+
+MusicKit.js cannot decrypt lossless audio or manage crossfade. Cider v3 built a custom audio engine to work around this. When wrapping `music.apple.com` directly, this is not a limitation - the web player uses Apple's own audio pipeline and lossless works exactly as it does in Chrome.
+
+### Why Not Wails?
+
+Martin normally uses Wails (Go + WebView). This won't work for Sidra:
+
+| Platform | Wails WebView | DRM Support |
+|---|---|---|
+| Linux | WebKitGTK | No Widevine |
+| macOS | WKWebView | Restricted (FairPlay, Apple apps only) |
+| Windows | WebView2 | PlayReady only, not Widevine |
+
+Standard Electron also won't work. CastLabs Electron is non-negotiable for Linux DRM support.
+
+---
+
+## Technology Stack
+
+| Component | Choice | Rationale |
+|---|---|---|
+| Shell | `castlabs/electron-releases` (wvcus) | Widevine CDM - no alternative exists |
+| Language | TypeScript | Type safety, ecosystem match |
+| Renderer content | `music.apple.com` | Zero UI code; Apple maintains it |
+| MusicKit hook | Injected JS script post-page-load | Hooks `MusicKit.getInstance()` events |
+| Preload | `contextBridge` IPC bridge | Standard Electron security pattern |
+| MPRIS (Linux) | `dbus-next` directly | Full control, clean service name |
+| Windows controls | Chromium `mediaSession` → GSMTC | Built-in bridge, identity via `setAppUserModelId` |
+| macOS controls | Chromium `mediaSession` → MPNowPlayingInfoCenter | Built-in bridge, identity via bundle name |
+| Config | `electron-store` | Persistent config (window bounds, settings) |
+| Build | `electron-builder` | AppImage + deb + rpm (Linux), DMG (macOS), NSIS (Windows) |
+| Package manager | pnpm | Consistent with Cider v1 approach |
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ CastLabs Electron (Widevine CDM auto-installed)         │
+│                                                         │
+│  ┌──────────────────────┐      ┌────────────────────┐  │
+│  │  Main Process        │◄─IPC─│  Renderer Process  │  │
+│  │                      │      │                    │  │
+│  │  ┌────────────────┐  │      │  music.apple.com   │  │
+│  │  │ IPC event hub  │  │      │  ┌──────────────┐  │  │
+│  │  │ (player.ts)    │  │      │  │ MusicKit.js  │  │  │
+│  │  └───────┬────────┘  │      │  └──────┬───────┘  │  │
+│  │          │           │      │         │ events   │  │
+│  │  ┌───────▼────────┐  │      │  ┌──────▼───────┐  │  │
+│  │  │ Integrations   │  │      │  │ Hook script  │  │  │
+│  │  │ ├─ MPRIS       │◄─┼──────┼──┤(injected JS) │  │  │
+│  │  │ ├─ Discord RPC │  │      │  └──────────────┘  │  │
+│  │  │ ├─ Notifier    │  │      │                    │  │
+│  │  │ └─ MediaSession│  │      │  ┌──────────────┐  │  │
+│  │  └───────┬────────┘  │      │  │  preload.ts  │  │  │
+│  │          │           │      │  │ (IPC bridge) │  │  │
+│  │  ┌───────▼────────┐  │      │  └──────────────┘  │  │
+│  │  │ electron-store │  │      └────────────────────┘  │
+│  │  └────────────────┘  │                               │
+│  └──────────────────────┘                               │
+└─────────────────────────────────────────────────────────┘
+         │ D-Bus (Linux)
+    ┌────▼───────┐
+    │  playerctl │
+    │  KDE/GNOME │
+    │  etc.      │
+    └────────────┘
+```
+
+---
+
+## Source Structure
+
+```
+sidra/
+├── src/
+│   ├── main.ts                    — bootstrap, Widevine wait, window, IPC hub
+│   ├── preload.ts                 — contextBridge IPC exposure (AMWrapper)
+│   ├── config.ts                  — electron-store wrapper
+│   ├── player.ts                  — EventEmitter: nowPlaying, playbackState, volume, etc.
+│   └── integrations/
+│       ├── integration.ts         — IIntegration interface (enable/disable)
+│       ├── mpris/
+│       │   └── index.ts           — D-Bus MPRIS service (Linux only)
+│       ├── discord-presence/
+│       │   └── index.ts           — Discord RPC with retry/debounce
+│       ├── notifications/
+│       │   └── index.ts           — Track change desktop notifications
+│       └── media-session/
+│           └── index.ts           — navigator.mediaSession updates (macOS/Win)
+├── assets/
+│   ├── musicKitHook.js            — Injected into music.apple.com post-load
+│   ├── styleFix.css               — Optional: suppress "Get the app" banners
+│   └── icons/
+│       ├── icon.png, icon.icns, icon.ico
+│       └── tray.png, tray@2x.png
+├── package.json
+└── tsconfig.json
+```
+
+---
+
+## Dependencies
+
+```json
+{
+  "devDependencies": {
+    "electron": "github:castlabs/electron-releases#v40.1.0+wvcus",
+    "electron-builder": "^25.x",
+    "typescript": "^5.x"
+  },
+  "dependencies": {
+    "dbus-next": "^0.10.x",
+    "@xhayper/discord-rpc": "^1.x",
+    "electron-store": "^9.x",
+    "electron-log": "^5.x"
+  }
+}
+```
+
+Four runtime dependencies. Compare to Cider v1's 25+.
+
+---
+
+## IPC Event Flow
+
+Events flow from the renderer (MusicKit hook script) to the main process (player.ts), which emits to all integrations.
+
+### Renderer → Main (via `ipcRenderer.send`)
+
+| Event | Payload | Consumers |
+|---|---|---|
+| `playbackStateDidChange` | `{ status: bool, state }` | MPRIS, Discord, Notifications |
+| `nowPlayingItemDidChange` | `{ name, albumName, artistName, durationInMillis, artworkUrl, genreNames, trackId }` or `null` | MPRIS, Discord, Notifications |
+| `playbackTimeDidChange` | Position in microseconds | MPRIS |
+| `repeatModeDidChange` | Mode integer (0/1/2) | MPRIS |
+| `shuffleModeDidChange` | Mode integer | MPRIS |
+| `volumeDidChange` | Volume float (0.0-1.0) | MPRIS |
+
+### Main → Renderer (via `webContents.executeJavaScript`)
+
+Integrations call back into the renderer through the `window.__sidra` control object:
+
+| Control | Method | Triggered by |
+|---|---|---|
+| Play | `window.__sidra.play()` | MPRIS `Play()` |
+| Pause | `window.__sidra.pause()` | MPRIS `Pause()` |
+| Play/Pause toggle | `window.__sidra.playPause()` | MPRIS `PlayPause()` |
+| Next track | `window.__sidra.next()` | MPRIS `Next()` |
+| Previous track | `window.__sidra.previous()` | MPRIS `Previous()` |
+| Seek | `window.__sidra.seek(seconds)` | MPRIS `Seek()`, `SetPosition()` |
+| Set volume | `window.__sidra.setVolume(float)` | MPRIS volume property |
+| Set repeat mode | `window.__sidra.setRepeat(mode)` | MPRIS `LoopStatus` |
+| Set shuffle mode | `window.__sidra.setShuffle(mode)` | MPRIS `Shuffle` |
+
+---
+
+## MusicKit Hook Script
+
+Injected into `music.apple.com` after page load via `webContents.executeJavaScript()`. Polls for `MusicKit` availability, hooks events, and exposes the `window.__sidra` control object.
+
+```javascript
+(function () {
+  const waitForMK = setInterval(() => {
+    if (!window.MusicKit) return;
+    clearInterval(waitForMK);
+
+    const mk = MusicKit.getInstance();
+
+    mk.addEventListener('playbackStateDidChange', ({ state }) => {
+      window.AMWrapper.ipcRenderer.send('playbackStateDidChange', {
+        status: state === MusicKit.PlaybackStates.playing,
+        state,
+      });
+    });
+
+    mk.addEventListener('nowPlayingItemDidChange', ({ item }) => {
+      if (!item) {
+        window.AMWrapper.ipcRenderer.send('nowPlayingItemDidChange', null);
+        return;
+      }
+      window.AMWrapper.ipcRenderer.send('nowPlayingItemDidChange', {
+        name: item.attributes.name,
+        albumName: item.attributes.albumName,
+        artistName: item.attributes.artistName,
+        durationInMillis: item.attributes.durationInMillis,
+        artworkUrl: item.attributes.artwork?.url
+          ?.replace('{w}', '512').replace('{h}', '512'),
+        genreNames: item.attributes.genreNames,
+        trackId: item.id,
+      });
+    });
+
+    mk.addEventListener('playbackTimeDidChange', () => {
+      window.AMWrapper.ipcRenderer.send('playbackTimeDidChange',
+        mk.currentPlaybackTime * 1_000_000  // microseconds for MPRIS
+      );
+    });
+
+    mk.addEventListener('repeatModeDidChange', () => {
+      window.AMWrapper.ipcRenderer.send('repeatModeDidChange', mk.repeatMode);
+    });
+
+    mk.addEventListener('shuffleModeDidChange', () => {
+      window.AMWrapper.ipcRenderer.send('shuffleModeDidChange', mk.shuffleMode);
+    });
+
+    mk.addEventListener('volumeDidChange', () => {
+      window.AMWrapper.ipcRenderer.send('volumeDidChange', mk.volume);
+    });
+
+    window.__sidra = {
+      play:       () => mk.play(),
+      pause:      () => mk.pause(),
+      playPause:  () => mk.isPlaying ? mk.pause() : mk.play(),
+      next:       () => mk.skipToNextItem(),
+      previous:   () => mk.skipToPreviousItem(),
+      seek:       (secs) => mk.seekToTime(secs),
+      setVolume:  (v) => { mk.volume = v; },
+      setRepeat:  (m) => { mk.repeatMode = m; },
+      setShuffle: (m) => { mk.shuffleMode = m; },
+    };
+
+    console.log('[Sidra] MusicKit hooked successfully');
+  }, 500);
+})();
+```
+
+---
+
+## Platform Media Controls
+
+The correct approach differs by platform. Conflating them is what goes wrong.
+
+### Linux: Explicit MPRIS via dbus-next
+
+**Service name**: `org.mpris.MediaPlayer2.sidra`
+
+Chromium has a built-in MPRIS bridge (via `navigator.mediaSession`) that must be disabled to avoid conflicts. It registers as `org.mpris.MediaPlayer2.chromium.instance{PID}`, which is useless for app identity. Both Cider and apple-music-wrapper disable it and implement their own D-Bus service.
+
+```typescript
+// In main.ts, before app.whenReady()
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('disable-features', 'MediaSessionService');
+  app.commandLine.appendSwitch('enable-features', 'UseOzonePlatform,WaylandWindowDecorations');
+}
+```
+
+### macOS: Chromium's Built-in mediaSession Bridge
+
+Chromium maps `navigator.mediaSession` to `MPNowPlayingInfoCenter` automatically. The **app bundle name** determines what appears in the Now Playing widget (Control Centre, Lock Screen) - set via `productName: "Sidra"` in electron-builder config.
+
+```typescript
+app.setName('Sidra'); // Belt and braces; actual identity comes from the bundle
+```
+
+`music.apple.com` already calls `navigator.mediaSession` internally, but its updates can lag. The hook script should also update `navigator.mediaSession` explicitly to ensure macOS sees correct metadata promptly.
+
+### Windows: Chromium's GSMTC Bridge
+
+Chromium maps `navigator.mediaSession` to Global System Media Transport Controls. Identity is set by:
+
+```typescript
+// main.ts - must run before app.whenReady()
+if (process.platform === 'win32') {
+  app.setAppUserModelId('sh.cider.sidra');
+}
+app.setName('Sidra');
+```
+
+The GSMTC overlay (media flyout on Windows 11) will show "Sidra" as the controlling app.
+
+---
+
+## MPRIS Specification
+
+Full `org.mpris.MediaPlayer2.Player` property and method checklist. All must work.
+
+### Properties
+
+| Property | Access | Sidra approach |
+|---|---|---|
+| `PlaybackStatus` | Read | From `playbackStateDidChange` |
+| `LoopStatus` | Read/Write | Bidirectional via `repeatModeDidChange` |
+| `Rate` | Read | Always 1.0 |
+| `Shuffle` | Read/Write | Bidirectional via `shuffleModeDidChange` |
+| `Metadata` | Read | Full dict on `nowPlayingItemDidChange` |
+| `Volume` | Read/Write | Bidirectional with suppression flag |
+| `Position` | Read | Updated from `playbackTimeDidChange` (microseconds) |
+| `MinimumRate` | Read | 1.0 |
+| `MaximumRate` | Read | 1.0 |
+| `CanGoNext` | Read | true |
+| `CanGoPrevious` | Read | true |
+| `CanPlay` | Read | true |
+| `CanPause` | Read | true |
+| `CanSeek` | Read | true |
+| `CanControl` | Read | true |
+
+### Methods
+
+| Method | Sidra approach |
+|---|---|
+| `Next()` | `mk.skipToNextItem()` |
+| `Previous()` | `mk.skipToPreviousItem()` |
+| `PlayPause()` | Toggle based on `mk.isPlaying` |
+| `Play()` | `mk.play()` |
+| `Pause()` | `mk.pause()` |
+| `Stop()` | `mk.stop()` |
+| `Seek(Offset)` | `mk.seekToTime(currentTime + offsetMicros / 1e6)` |
+| `SetPosition(id, pos)` | `mk.seekToTime(posMicros / 1e6)` |
+
+### Signals
+
+| Signal | Behaviour |
+|---|---|
+| `Seeked` | Emit on user-initiated seeks only. `playbackTimeDidChange` fires every ~250ms. Store the value but only emit `Seeked` when the new position differs from `(lastPosition + elapsed)` by more than ~1s, indicating a real seek. |
+
+### Metadata Mapping
+
+| MPRIS property | MusicKit source |
+|---|---|
+| `mpris:trackid` | `/org/sidra/track/{item.id}` |
+| `mpris:length` | `durationInMillis * 1000` (microseconds) |
+| `mpris:artUrl` | `artwork.url` (512x512) |
+| `xesam:title` | `attributes.name` |
+| `xesam:album` | `attributes.albumName` |
+| `xesam:artist` | `[attributes.artistName]` (array) |
+| `xesam:genre` | `attributes.genreNames` |
+
+---
+
+## Volume Sync
+
+Cider's MPRIS volume sync is one-directional (MPRIS to MusicKit only, no reliable MusicKit to MPRIS), with a feedback loop on `volumeDidChange`. Sidra fixes this with a suppression flag pattern:
+
+```
+MPRIS sets volume
+  → executeJavaScript sets mk.volume
+    → mk fires volumeDidChange
+      → IPC sends volume back to main
+        → suppression flag swallows the echo
+```
+
+### Main process (MPRIS integration)
+
+```typescript
+let mprisInitiatedVolumeChange = false;
+
+// MPRIS → UI
+mprisPlayer.on('volume', (volume: string) => {
+  const v = Math.min(1, Math.max(0, parseFloat(volume)));
+  mprisInitiatedVolumeChange = true;
+  win.webContents.executeJavaScript(`window.__sidra.setVolume(${v})`);
+  setTimeout(() => { mprisInitiatedVolumeChange = false; }, 200);
+});
+
+// UI → MPRIS
+ipcMain.on('volumeDidChange', (_event, volume: number) => {
+  if (mprisInitiatedVolumeChange) return; // swallow the echo
+  mprisPlayer.volume = volume;
+});
+```
+
+Also update `navigator.mediaSession` volume whenever MusicKit volume changes - `music.apple.com` does not always do this itself.
+
+---
+
+## Authentication
+
+Non-issue by design. Cider's auth breaks because it uses MusicKit.js with a developer token it controls and the OAuth user-token flow. Sidra loads `music.apple.com` - Apple handles authentication entirely. Identical to opening Chrome and navigating to `music.apple.com`.
+
+The only implementation requirement: use a named persistent partition so cookies and localStorage survive between launches.
+
+```typescript
+const win = new BrowserWindow({
+  webPreferences: {
+    partition: 'persist:sidra',
+    preload: path.join(__dirname, 'preload.js'),
+    nodeIntegration: false,
+    contextIsolation: true,
+  }
+});
+```
+
+---
+
+## Discord Rich Presence
+
+Uses `@xhayper/discord-rpc`. Requires creating a Discord Application at discord.com/developers for a Client ID and uploading Sidra branding assets.
+
+Reference implementation: [ytmdesktop Discord presence](https://github.com/ytmdesktop/ytmdesktop/blob/development/src/main/integrations/discord-presence/index.ts)
+
+### Behaviour
+
+- **Activity type**: `ActivityType.Listening` ("Listening to" status text)
+- **Details**: Track name (truncated to 128 chars)
+- **State**: Artist name (truncated to 128 chars)
+- **Artwork**: Apple Music CDN URLs work directly as `large_image` if under 256 chars (typical range: 80-130 chars). Fall back to a Discord-hosted `sidra_logo` asset if over the limit.
+- **Timestamps**: When playing, set `start` and `end` to show elapsed/remaining. Omit when paused.
+- **Debounce**: 1s debounce on updates to coalesce rapid events (track change + position update landing together).
+- **Pause timeout**: Clear activity after 30s paused (ytmdesktop pattern) - courtesy to users who do not want to broadcast a paused state.
+- **Retry**: Reconnect with backoff on Discord IPC disconnection.
+
+```typescript
+class DiscordPresence {
+  private readonly CLIENT_ID = 'YOUR_SIDRA_CLIENT_ID';
+  private client: Client;
+  private debounceTimeout: NodeJS.Timeout | null = null;
+  private pauseTimeout: NodeJS.Timeout | null = null;
+  private retries = 0;
+
+  private updateActivity(metadata: TrackMetadata, positionSecs: number, isPlaying: boolean) {
+    if (this.debounceTimeout) clearTimeout(this.debounceTimeout);
+    this.debounceTimeout = setTimeout(() => {
+      const durationSecs = metadata.durationInMillis / 1000;
+
+      this.client.user?.setActivity({
+        type: ActivityType.Listening,
+        details: truncate(metadata.name, 128),
+        state: `by ${truncate(metadata.artistName, 128)}`,
+        assets: {
+          large_image: metadata.artworkUrl.length <= 256
+            ? metadata.artworkUrl
+            : 'sidra_logo',
+          large_text: truncate(metadata.albumName, 128),
+          small_image: 'sidra_logo',
+          small_text: 'Sidra',
+        },
+        timestamps: isPlaying ? {
+          start: Date.now() - (positionSecs * 1000),
+          end: Date.now() + ((durationSecs - positionSecs) * 1000),
+        } : undefined,
+      });
+      this.debounceTimeout = null;
+    }, 1000);
+
+    clearTimeout(this.pauseTimeout);
+    if (!isPlaying) {
+      this.pauseTimeout = setTimeout(() => {
+        this.client.user?.clearActivity();
+      }, 30_000);
+    }
+  }
+}
+```
+
+---
+
+## Track Change Notifications
+
+Electron's built-in `Notification` API, works on all three platforms. Notification source shows as "Sidra" (app name) automatically.
+
+```typescript
+import { Notification } from 'electron';
+import https from 'https';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+let lastArtworkUrl = '';
+let cachedArtworkPath = '';
+
+async function getArtworkPath(url: string): Promise<string> {
+  if (url === lastArtworkUrl && cachedArtworkPath) return cachedArtworkPath;
+  const dest = path.join(os.tmpdir(), 'sidra-artwork.jpg');
+  await new Promise<void>((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    https.get(url, res => res.pipe(file).on('finish', resolve)).on('error', reject);
+  });
+  lastArtworkUrl = url;
+  cachedArtworkPath = dest;
+  return dest;
+}
+
+async function showTrackNotification(metadata: TrackMetadata, enabled: boolean) {
+  if (!enabled) return;
+  const iconPath = await getArtworkPath(metadata.artworkUrl);
+  new Notification({
+    title: metadata.name,
+    body: `${metadata.artistName} — ${metadata.albumName}`,
+    icon: iconPath,
+    silent: true,
+  }).show();
+}
+```
+
+Notifications are toggleable via an `electron-store` boolean setting (default: on).
+
+---
+
+## Feature Inventory
+
+### v0.1 - Linux MLP
+
+| Feature | Implementation | Notes |
+|---|---|---|
+| Apple Music web app (DRM) | CastLabs Electron + `music.apple.com` | Widevine CDM auto-installs |
+| Auth | Apple's own web flow | Persistent partition; no developer tokens |
+| MPRIS (Linux) | `dbus-next` D-Bus service | `org.mpris.MediaPlayer2.sidra` |
+| MPRIS primitives | play/pause/next/prev/seek/stop | From MusicKit events via IPC |
+| MPRIS metadata | title/artist/album/artwork/duration/trackId | From `nowPlayingItemDidChange` |
+| MPRIS volume | Two-way with suppression flag | musicKitHook.js + main MPRIS plugin |
+| MPRIS repeat/shuffle | Two-way | `repeatModeDidChange` + `shuffleModeDidChange` |
+| Discord Rich Presence | `@xhayper/discord-rpc` | With debounce + pause timeout + retry |
+| Track change notifications | Electron `Notification` | With artwork, suppressable in settings |
+| User-agent spoofing | `webRequest.onBeforeSendHeaders` | Standard Chrome UA |
+| Window state persistence | `electron-store` | Bounds, maximised state |
+| Wayland support | `--enable-features=UseOzonePlatform` | Auto-detected via platform check |
+| App identity | `app.setName('Sidra')` | Consistent across all platform controls |
+
+### v0.2 - macOS + Windows Builds
+
+| Feature | Implementation | Notes |
+|---|---|---|
+| macOS Now Playing | Chromium mediaSession → MPNowPlayingInfoCenter | Bundle name "Sidra" from productName |
+| Windows GSMTC | Chromium mediaSession → GSMTC | `app.setAppUserModelId('sh.cider.sidra')` |
+| Explicit `navigator.mediaSession` updates | musicKitHook.js | Supplement Apple's own updates |
+| System tray | Electron `Tray` | Prev/play-pause/next + show/hide |
+| macOS `.app` build | electron-builder | DMG |
+| Windows build | electron-builder | NSIS installer |
+
+### v0.3 - Nice to Have
+
+| Feature | Notes |
+|---|---|
+| Last.fm scrobbling | ~100 lines, proven pattern from Cider/apple-music-wrapper |
+| AirPlay casting | `airtunes2` node module (Cider v1 has this) |
+
+### Explicitly Out of Scope
+
+- Custom UI or theming of any kind
+- Audio effects or EQ
+- Plugin/extension system
+- Lossless upgrade (already works via the web player)
+
+---
+
+## Risk Assessment
+
+| Risk | Severity | Likelihood | Mitigation |
+|---|---|---|---|
+| Apple blocks Electron user agent | High | Low | Spoof Chrome UA on all requests |
+| Apple changes MusicKit.js API | Medium | Low | MusicKit.js is a public developer API with versioning |
+| CastLabs Electron lags Electron releases | Low | Medium | Only affects security patching cadence; v40.1.0+wvcus released Feb 2026, tracking close to mainline |
+| Live radio stations crash | Medium | Confirmed | Known issue in apple-music-wrapper; investigate `did-crash` handler |
+| CSP blocks script injection | Low | Very low | `executeJavaScript()` bypasses page CSP in Electron |
+| Apple legal action | Medium | Very low | Multiple similar apps exist and have for years; requires Apple Music subscription |
+
+---
+
+## Prior Art
+
+### apple-music-wrapper
+
+**Repository**: https://github.com/Nightdavisao/apple-music-wrapper
+**Licence**: MPL-2.0
+
+Working implementation of exactly the Sidra approach. CastLabs Electron wrapping `music.apple.com` with injected MusicKit hooks. Features implemented and working: Linux MPRIS, Discord RPC, Last.fm, tray controls, Apple Music Classical switching. Known limitation: live radio stations cause crashes.
+
+Key reference files:
+- [main.ts](https://github.com/Nightdavisao/apple-music-wrapper/blob/main/src/main.ts) - `--disable-features=MediaSessionService` pattern, CastLabs Electron, Widevine wait
+- [preload.ts](https://github.com/Nightdavisao/apple-music-wrapper/blob/main/src/preload.ts) - IPC bridge
+- [package.json](https://github.com/Nightdavisao/apple-music-wrapper/blob/main/package.json) - CastLabs Electron + dbus-next deps
+
+### Cider v1
+
+**Repository**: https://github.com/ciderapp/Cider
+**Licence**: AGPL-3.0 (archived Dec 2024)
+
+Full custom UI on MusicKit.js. Plugin-based architecture with MPRIS, Discord, Last.fm, AirPlay, Chromecast integrations. Instructive as a reference for what to do and what to avoid.
+
+Key reference files:
+- [package.json](https://github.com/ciderapp/Cider/blob/main/package.json) - CastLabs Electron, mpris-service, all deps
+- [MPRIS plugin](https://github.com/ciderapp/Cider/blob/main/src/main/plugins/mpris.ts) - one-directional volume sync flaw visible in source
+- [main index.ts](https://github.com/ciderapp/Cider/blob/main/src/main/index.ts) - bootstrap pattern
+- [thumbar plugin](https://github.com/ciderapp/Cider/blob/main/src/main/plugins/thumbar.ts) - Windows taskbar integration
+- [mpris-service fork](https://github.com/ciderapp/mpris-service)
+
+### ytmdesktop
+
+**Repository**: https://github.com/ytmdesktop/ytmdesktop
+**Stars**: 5.6k, actively maintained (v2.0.11 Feb 2026)
+
+Uses Chromium's built-in mediaSession bridges for macOS/Windows with no explicit MPRIS or SMTC library. Has a hand-rolled minimal Discord IPC client (~200 lines) instead of an npm dependency. No MPRIS on Linux - relies on Chromium's bridge, which shows as "chromium".
+
+Key reference files:
+- [Discord presence](https://github.com/ytmdesktop/ytmdesktop/blob/development/src/main/integrations/discord-presence/index.ts) - debounce, pause timeout, artwork URL pattern
+- [package.json](https://github.com/ytmdesktop/ytmdesktop/blob/development/package.json) - confirmed no explicit MPRIS/SMTC library
+
+### Cider Version History
+
+| Version | Period | Stack | Status |
+|---|---|---|---|
+| Apple-Music-Electron | Pre-2022 | Electron + plain JS | Deprecated |
+| Cider v1 | 2022-2023 | Electron (CastLabs) + Vue.js 2 + TypeScript + Webpack | AGPL-3.0, archived Dec 2024 |
+| Cider v2 | 2023-2025 | Electron (CastLabs, non-Windows) + .NET/WebView2 (Windows) + Vue.js + TypeScript | Proprietary |
+| Cider v3 | July 2025-present | Same base + new audio engine + Taproom auth | Proprietary, current |
+
+---
+
+## Sources
+
+1. **Cider v1 open source repo (AGPL-3.0)** - https://github.com/ciderapp/Cider
+2. **Cider v2 issue tracker** - https://github.com/ciderapp/Cider-2
+3. **Cider v1 package.json** - https://github.com/ciderapp/Cider/blob/main/package.json
+4. **Cider v1 MPRIS plugin** - https://github.com/ciderapp/Cider/blob/main/src/main/plugins/mpris.ts
+5. **Cider v1 main index.ts** - https://github.com/ciderapp/Cider/blob/main/src/main/index.ts
+6. **Cider v1 thumbar plugin** - https://github.com/ciderapp/Cider/blob/main/src/main/plugins/thumbar.ts
+7. **Cider mpris-service fork** - https://github.com/ciderapp/mpris-service
+8. **Cider changelogs** - https://cider.sh/changelogs
+9. **Cider 3.0.0 changelog** - https://cider.sh/changelogs/3.0.0
+10. **CastLabs Electron for Content Security** - https://github.com/castlabs/electron-releases
+11. **apple-music-wrapper** - https://github.com/Nightdavisao/apple-music-wrapper
+12. **apple-music-wrapper package.json** - https://github.com/Nightdavisao/apple-music-wrapper/blob/main/package.json
+13. **apple-music-wrapper preload.ts** - https://github.com/Nightdavisao/apple-music-wrapper/blob/main/src/preload.ts
+14. **apple-music-wrapper main.ts** - https://github.com/Nightdavisao/apple-music-wrapper/blob/main/src/main.ts
+15. **Nativefier Apple Music DRM issue** - https://github.com/nativefier/nativefier/issues/989
+16. **Chromium MPRIS service name discussion** - https://groups.google.com/a/chromium.org/g/media-dev/c/v8JtLAvZiIQ
+17. **Apple Music API break (9to5Mac)** - https://9to5mac.com/2022/12/08/apple-music-third-party-app-api-change/
+18. **Cider on OMG! Ubuntu** - https://www.omgubuntu.co.uk/2022/07/cider-is-an-open-source-apple-music-client-for-linux-desktops
+19. **ytmdesktop Discord presence** - https://github.com/ytmdesktop/ytmdesktop/blob/development/src/main/integrations/discord-presence/index.ts
+20. **ytmdesktop package.json** - https://github.com/ytmdesktop/ytmdesktop/blob/development/package.json
