@@ -2,7 +2,7 @@
 
 A minimal Apple Music desktop client. CastLabs Electron wraps `music.apple.com` directly, injecting a lightweight hook script to bridge MusicKit.js events to native platform media controls. Apple maintains the UI; Sidra maintains the bridge.
 
-Target: under 1000 lines of application code. Four runtime dependencies.
+The codebase is tightly focused and as lean as possible. Four runtime dependencies.
 
 ---
 
@@ -39,7 +39,7 @@ Cider builds a custom UI on top of MusicKit.js and maintains thousands of compon
 | Stability | Complex custom stack with many moving parts | Minimal surface area |
 | Apple API changes | Broken the app entirely (Dec 2022) | Web app just updates silently |
 | Cross-platform effort | Different backends per platform | Same shell everywhere |
-| Code volume | ~5000+ commits | Target: <1000 lines |
+| Code volume | ~5000+ commits | Tightly focused, as lean as possible |
 
 Cider's MPRIS is broken because it is a fragile IPC relay built on top of a custom UI layer built on top of MusicKit.js. Every layer adds failure modes. Sidra bypasses all of that - Apple's own web app handles playback state, and we observe it.
 
@@ -47,7 +47,7 @@ MusicKit.js cannot decrypt lossless audio or manage crossfade. Cider v3 built a 
 
 ### Why Not Wails?
 
-Martin normally uses Wails (Go + WebView). This won't work for Sidra:
+Wails (Go + WebView) is the preferred stack for other projects, but platform WebViews lack the DRM support Sidra requires:
 
 | Platform | Wails WebView | DRM Support |
 |---|---|---|
@@ -135,7 +135,9 @@ sidra/
 │           └── index.ts           — navigator.mediaSession updates (macOS/Win)
 ├── assets/
 │   ├── musicKitHook.js            — Injected into music.apple.com post-load
-│   ├── styleFix.css               — Optional: suppress "Get the app" banners
+│   ├── styleFix.css               — CSS overrides injected via webContents.insertCSS()
+│   │                                 Hides "Get the app" and "Open in Music" banners
+│   │                                 that Apple shows to push users toward native apps
 │   └── icons/
 │       ├── icon.png, icon.icns, icon.ico
 │       └── tray.png, tray@2x.png
@@ -164,6 +166,15 @@ sidra/
 ```
 
 Four runtime dependencies. Compare to Cider v1's 25+.
+
+### Logging
+
+`electron-log` handles all application logging. Use structured log levels consistently:
+
+- `log.info` - startup, integration lifecycle (enabled/disabled), MusicKit hook confirmation
+- `log.warn` - recoverable issues (Discord RPC disconnection, notification artwork fetch failure)
+- `log.error` - unrecoverable issues (D-Bus connection failure, Widevine CDM unavailable)
+- `log.debug` - IPC event flow, state transitions (noisy, off by default)
 
 ---
 
