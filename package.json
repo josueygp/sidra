@@ -1,6 +1,6 @@
 {
   "name": "sidra",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "An elegant Apple Music desktop client. No frippery, just quality. A better class of Cider 🍎",
   "main": "dist/main.js",
   "scripts": {
@@ -28,7 +28,9 @@
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "asar": true,
     "icon": "build/icon.png",
-    "files": ["dist/**/*"],
+    "files": [
+      "dist/**/*"
+    ],
     "directories": {
       "output": "release"
     },
@@ -36,7 +38,11 @@
       "mirror": "https://github.com/castlabs/electron-releases/releases/download/v"
     },
     "linux": {
-      "target": ["AppImage", "deb", "rpm"],
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm"
+      ],
       "category": "Audio",
       "executableName": "sidra"
     },
@@ -49,7 +55,9 @@
     },
     "afterPack": "build/afterPack.cjs",
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "build/icon.icns",
       "category": "public.app-category.music",
       "darkModeSupport": true,
@@ -66,12 +74,22 @@
       },
       "iconSize": 80,
       "contents": [
-        { "x": 130, "y": 220 },
-        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "build/icon.ico"
     },
     "nsis": {
