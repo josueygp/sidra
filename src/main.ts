@@ -7,6 +7,7 @@ import { getLoadingText, getStorefront as getLocaleStorefront } from './i18n';
 import { getAssetPath } from './paths';
 import { Player } from './player';
 import { createTray } from './tray';
+import { init as initNotifications } from './integrations/notifications';
 
 // --- Logging: initialise before anything else ---
 log.initialize();
@@ -24,6 +25,11 @@ if (process.env.ELECTRON_LOG_LEVEL) {
 
 const mainLog = log.scope('main');
 const splashLog = log.scope('splash');
+
+// --- App identity: required on Windows for notifications to appear ---
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.wimpysworld.sidra');
+}
 
 // --- Platform switches: must run before app.whenReady() ---
 if (process.platform === 'linux') {
@@ -228,6 +234,8 @@ app.whenReady().then(async () => {
       plugins: true,
     },
   });
+
+  initNotifications(player, () => win);
 
   Promise.all([minDisplay, cssReady]).then(() => {
     splashLog.info('splash closed');

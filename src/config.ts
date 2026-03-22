@@ -5,6 +5,7 @@ const configLog = log.scope('config');
 interface StoreSchema {
   storefront: string;
   language: string | null;
+  'notifications.enabled': boolean;
 }
 
 // electron-store v10 is ESM-only; under CommonJS moduleResolution TypeScript
@@ -41,4 +42,16 @@ export function getLanguage(): string | null | undefined {
 export function setLanguage(lang: string | null): void {
   store.set('language', lang);
   configLog.info('language set:', lang);
+}
+
+export function getNotificationsEnabled(): boolean {
+  if (!store.has('notifications.enabled')) {
+    return true;  // default on
+  }
+  return store.get('notifications.enabled');
+}
+
+export function setNotificationsEnabled(enabled: boolean): void {
+  store.set('notifications.enabled', enabled);
+  configLog.info('notifications.enabled set:', enabled);
 }

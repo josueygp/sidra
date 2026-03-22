@@ -116,6 +116,43 @@ export const QUIT_TEXT: Record<string, string> = {
   'he': 'יציאה',
 };
 
+// --- "Notifications" ---
+export const NOTIFICATIONS_TEXT: Record<string, string> = {
+  'en': 'Notifications',
+  'zh-CN': '通知',
+  'zh-SG': '通知',
+  'zh-TW': '通知',
+  'zh-HK': '通知',
+  'es': 'Notificaciones',
+  'hi': 'सूचनाएँ',
+  'ar': 'الإشعارات',
+  'fr': 'Notifications',
+  'pt': 'Notificações',
+  'de': 'Benachrichtigungen',
+  'ru': 'Уведомления',
+  'ja': '通知',
+  'ko': '알림',
+  'it': 'Notifiche',
+  'nl': 'Meldingen',
+  'pl': 'Powiadomienia',
+  'tr': 'Bildirimler',
+  'sv': 'Aviseringar',
+  'da': 'Notifikationer',
+  'fi': 'Ilmoitukset',
+  'nb': 'Varsler',
+  'no': 'Varsler',
+  'cs': 'Oznámení',
+  'ro': 'Notificări',
+  'hu': 'Értesítések',
+  'el': 'Ειδοποιήσεις',
+  'th': 'การแจ้งเตือน',
+  'id': 'Notifikasi',
+  'ms': 'Pemberitahuan',
+  'uk': 'Сповіщення',
+  'vi': 'Thông báo',
+  'he': 'התראות',
+};
+
 // --- "Close" ---
 export const CLOSE_TEXT: Record<string, string> = {
   'en': 'Close',
@@ -319,13 +356,14 @@ export function getLoadingText(): { text: string; lang: string } {
   return { text, lang };
 }
 
-export function getTrayStrings(): { about: string; quit: string } {
+export function getTrayStrings(): { about: string; quit: string; notifications: string } {
   const langs = getSystemLanguages();
   const productName: string = pkg.build?.productName ?? app.getName();
   const aboutTemplate = getLocalizedString(ABOUT_TEXT, langs);
   const about = aboutTemplate.replace('{name}', productName);
   const quit = getLocalizedString(QUIT_TEXT, langs);
-  return { about, quit };
+  const notifications = getLocalizedString(NOTIFICATIONS_TEXT, langs);
+  return { about, quit, notifications };
 }
 
 export function getAboutStrings(): {

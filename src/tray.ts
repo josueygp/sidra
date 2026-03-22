@@ -3,6 +3,7 @@ import path from 'path';
 import log from 'electron-log/main';
 import { getTrayStrings, getAboutStrings } from './i18n';
 import { getAssetPath } from './paths';
+import { getNotificationsEnabled, setNotificationsEnabled } from './config';
 
 const trayLog = log.scope('tray');
 
@@ -82,6 +83,35 @@ function showAboutWindow(): void {
   });
 }
 
+function buildContextMenu(tray: Tray): Menu {
+  const strings = getTrayStrings();
+  const aboutGlyph = '🛈';
+  const quitGlyph = '🆇';
+  const notifEnabled = getNotificationsEnabled();
+  const notifGlyph = notifEnabled ? '●' : '○';
+
+  return Menu.buildFromTemplate([
+    {
+      label: `${aboutGlyph} ${strings.about}`,
+      click: () => showAboutWindow(),
+    },
+    {
+      label: `${notifGlyph} ${strings.notifications}`,
+      type: 'checkbox',
+      checked: notifEnabled,
+      click: (menuItem) => {
+        setNotificationsEnabled(menuItem.checked);
+        tray.setContextMenu(buildContextMenu(tray));
+      },
+    },
+    { type: 'separator' },
+    {
+      label: `${quitGlyph} ${strings.quit}`,
+      click: () => app.quit(),
+    },
+  ]);
+}
+
 export function createTray(): Tray {
   const iconPath = getTrayIconPath();
   trayLog.info('creating tray with icon:', iconPath);
@@ -90,20 +120,7 @@ export function createTray(): Tray {
   const productName: string = pkg.build?.productName ?? app.getName();
   tray.setToolTip(productName);
 
-  const strings = getTrayStrings();
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: strings.about,
-      click: () => showAboutWindow(),
-    },
-    { type: 'separator' },
-    {
-      label: strings.quit,
-      click: () => app.quit(),
-    },
-  ]);
-
-  tray.setContextMenu(contextMenu);
+  tray.setContextMenu(buildContextMenu(tray));
 
   if (process.platform === 'linux') {
     nativeTheme.on('updated', () => {

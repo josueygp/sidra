@@ -54,6 +54,7 @@
                 gtk3
                 libdrm
                 libgbm
+                libnotify
                 libGL
                 mesa
                 nspr
