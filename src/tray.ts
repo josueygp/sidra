@@ -87,16 +87,17 @@ function buildContextMenu(tray: Tray): Menu {
   const strings = getTrayStrings();
   const aboutGlyph = '🛈';
   const quitGlyph = '🆇';
+  const isLinux = process.platform === 'linux';
   const notifEnabled = getNotificationsEnabled();
   const notifGlyph = notifEnabled ? '●' : '○';
 
   return Menu.buildFromTemplate([
     {
-      label: `${aboutGlyph} ${strings.about}`,
+      label: isLinux ? `${aboutGlyph} ${strings.about}` : strings.about,
       click: () => showAboutWindow(),
     },
     {
-      label: `${notifGlyph} ${strings.notifications}`,
+      label: isLinux ? `${notifGlyph} ${strings.notifications}` : strings.notifications,
       type: 'checkbox',
       checked: notifEnabled,
       click: (menuItem) => {
@@ -106,7 +107,7 @@ function buildContextMenu(tray: Tray): Menu {
     },
     { type: 'separator' },
     {
-      label: `${quitGlyph} ${strings.quit}`,
+      label: isLinux ? `${quitGlyph} ${strings.quit}` : strings.quit,
       click: () => app.quit(),
     },
   ]);
