@@ -44,6 +44,7 @@ sidra/
 │       └── media-session/   — navigator.mediaSession (macOS/Windows)
 ├── assets/
 │   ├── musicKitHook.js      — Injected into music.apple.com
+│   ├── navigationBar.js     — Injected browser navigation controls (Back/Forward/Reload)
 │   ├── styleFix.css         — Suppress "Get the app" banners
 │   ├── icons/
 │   └── source/              — Gimp XCF masters and SVG source files
@@ -196,6 +197,8 @@ Most Apple Music styling responds to `:root` custom property overrides. These el
 | Side panels (Lyrics/Up Next) | `.side-panel`, `.side-panel-header-wrapper` | Direct `background-color` |
 | Page footer | `.scrollable-page > footer` | Direct `background-color` |
 | LCD now-playing widget | `amp-lcd { --lcd-bg-color }` | Shadow DOM scoped variable |
+| Accent-coloured buttons | `.button.primary button.click-action` | Direct `background-color: rgb(214, 0, 23)` ignores `--keyColor` |
+| Accent CSS variables (`--keyColor` and variants) | `*` | Shadow DOM of `amp-*` elements does not inherit from `:root` |
 
 **Pattern:** when a `:root` variable override has no visible effect, the element either (a) uses a shadow-DOM-scoped custom property (set the variable on the host element), or (b) paints its own background via `::before` or a direct property (use a direct selector with `!important`).
 
@@ -238,3 +241,4 @@ CSS files read via `fs.readFileSync` at runtime must be listed individually in `
 - `SIDRA_DISABLE_AUTO_UPDATE=1` env var disables auto-update for AppImage/NSIS builds; future package managers (Scoop, Chocolatey) must set this in their install manifests
 - AppImage `artifactName` must omit the version component (use `${productName}-${os}-${arch}.${ext}`) to prevent filename changes breaking desktop shortcuts after update
 - On NixOS, `libxcrypt-legacy` must be in `LD_LIBRARY_PATH` (already added to `flake.nix`) for fpm's bundled Ruby to find `libcrypt.so.1` during deb/rpm builds; without it, deb/rpm targets fail at the fpm stage
+- `webContents.reload()` must be preceded by `wedgeDetector.reset()` when called from an IPC handler; without this, the wedge detector's `isPlaying` flag remains `true` through the reload, causing spurious skip-forward attempts after the page re-initialises
