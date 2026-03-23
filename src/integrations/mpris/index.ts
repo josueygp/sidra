@@ -3,6 +3,19 @@ import log from 'electron-log/main';
 
 import { Player } from '../../player';
 
+// @ts-ignore
+import * as path from 'path';
+// @ts-ignore
+import * as os from 'os';
+// @ts-ignore
+import * as crypto from 'crypto';
+// @ts-ignore
+import * as https from 'https';
+// @ts-ignore
+import { createWriteStream, promises as fsp } from 'fs';
+
+declare var process: any;
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const dbus = require('@holusion/dbus-next');
 const {
@@ -537,7 +550,7 @@ function buildMetadata(payload: {
   }
 
   if (payload.artworkUrl != null) {
-    metadata['xesam:artUrl'] = new Variant('s', payload.artworkUrl);
+    metadata['mpris:artUrl'] = new Variant('s', payload.artworkUrl);
   }
 
   if (payload.url != null) {
@@ -609,14 +622,62 @@ function onNowPlayingItemDidChange(payload: unknown): void {
   const rawId = p.trackId ?? 'unknown';
   const trackId = `/org/${appName}/track/${sanitiseTrackId(rawId)}`;
 
-  playerIfaceRef._metadata = metadata;
-  playerIfaceRef._currentTrackId = trackId;
-  schedulePropertyEmission({ Metadata: metadata });
+  const setMetadata = () => {
+    if (playerIfaceRef) {
+      playerIfaceRef._metadata = metadata;
+      playerIfaceRef._currentTrackId = trackId;
+      playerIfaceRef._position = 0;
+      schedulePropertyEmission({ Metadata: metadata });
+      playerIfaceRef.Seeked(0);
+    }
+  };
 
   lastPositionUs = 0;
   lastPositionTimestamp = Date.now();
-  playerIfaceRef._position = 0;
-  playerIfaceRef.Seeked(0);
+
+  if (p.artworkUrl && p.artworkUrl.startsWith('https://')) {
+    try {
+      const cacheDir = path.join(app.getPath('userData' as any), 'art');
+      if (!require('fs').existsSync(cacheDir)) {
+        require('fs').mkdirSync(cacheDir, { recursive: true });
+      }
+      const hash = crypto.createHash('md5').update(p.artworkUrl).digest('hex');
+      const ext = p.artworkUrl.split('.').pop()?.split('?')[0] || 'jpg';
+      const filepath = path.join(cacheDir, `sidra-art-${hash}.${ext}`);
+      const fileUrl = `file://${filepath}`;
+
+      fsp.stat(filepath)
+        .then(() => {
+          metadata['mpris:artUrl'] = new Variant('s', fileUrl);
+          setMetadata();
+        })
+        .catch(() => {
+          https.get(p.artworkUrl as string, (res: any) => {
+            if (res.statusCode === 200) {
+              const stream = createWriteStream(filepath);
+              res.pipe(stream);
+              stream.on('finish', () => {
+                stream.close();
+                mprisLog.debug('Cached artwork to local file:', fileUrl);
+                metadata['mpris:artUrl'] = new Variant('s', fileUrl);
+                setMetadata();
+              });
+            } else {
+              mprisLog.warn('failed to download artwork. HTTP code:', res.statusCode);
+              setMetadata();
+            }
+          }).on('error', (err: Error) => {
+            mprisLog.warn('failed to download artwork for MPRIS:', err.message);
+            setMetadata();
+          });
+        });
+    } catch (err: any) {
+      mprisLog.error('failed to process artwork caching:', err.message);
+      setMetadata();
+    }
+  } else {
+    setMetadata();
+  }
 }
 
 function onRepeatModeDidChange(payload: unknown): void {
